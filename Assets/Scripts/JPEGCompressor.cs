@@ -25,6 +25,7 @@ public class JPEGCompressor : MonoBehaviour
     public Image ZigZagArrayPixelImage;
     public Transform ZigZagMatrixNumberParent;
     public Transform ZigZagArrayNumberParent;
+    public Transform RLEParent;
     public Transform HuffmanParent;
     public Transform HuffmanTreeParent;
 
@@ -39,6 +40,7 @@ public class JPEGCompressor : MonoBehaviour
     public TMP_Text[] QuantizedCells = new TMP_Text[64];
     public TMP_Text[] ZigZagMatrixNumberCells = new TMP_Text[64];
     public TMP_Text[] ZigZagArrayNumberCells = new TMP_Text[64];
+    public TMP_Text[] RLECells = new TMP_Text[64];
     public TMP_Text[] HuffmanCells = new TMP_Text[64];
 
     public readonly int[,] LumaQ =
@@ -671,7 +673,7 @@ public class JPEGCompressor : MonoBehaviour
             if (order[i].y * 8 + order[i].x == index)
             {
                 float hue = i / 63f;
-                return Color.HSVToRGB(hue, 1f, 1f);
+                return Color.HSVToRGB(hue, 1f, 0.6f);
             }
         }
         
@@ -690,7 +692,7 @@ public class JPEGCompressor : MonoBehaviour
                 int value = Mathf.RoundToInt(array[i]);
                 ZigZagArrayNumberCells[i].text = value.ToString();
                 float hue = i / 63f;
-                ZigZagArrayNumberCells[i].color = Color.HSVToRGB(hue, 1f, 1f);
+                ZigZagArrayNumberCells[i].color = Color.HSVToRGB(hue, 1f, 0.6f);
             }
         }
     }
@@ -705,42 +707,107 @@ public class JPEGCompressor : MonoBehaviour
     class HuffmanNode
     {
         public int? value;
+        public string rleKey;
         public int frequency;
         public HuffmanNode left;
         public HuffmanNode right;
         public string code = "";
 
-        public bool IsLeaf => value.HasValue;
+        public bool IsLeaf => value.HasValue || !string.IsNullOrEmpty(rleKey);
     }
 
-    Dictionary<int, string> huffmanCodes = new Dictionary<int, string>();
+    public struct RLEPair
+    {
+        public int run;
+        public int value;
+        
+        public RLEPair(int r, int v)
+        {
+            run = r;
+            value = v;
+        }
+    }
+
+    List<RLEPair> rleData = new List<RLEPair>();
+    Dictionary<string, string> huffmanCodes = new Dictionary<string, string>();
     HuffmanNode huffmanRoot;
 
     public void UpdateHuffmanPanel()
     {
         float[] zigzagArray = GetSelectedBlockZigZag();
-        BuildHuffmanTree(zigzagArray);
-        ShowHuffmanData(zigzagArray);
+        rleData = RLEEncode(zigzagArray);
+        ShowRLEData(rleData);
+        BuildHuffmanTree(rleData);
+        ShowHuffmanData(rleData);
         VisualizeHuffmanTree();
     }
 
-    void BuildHuffmanTree(float[] array)
+    List<RLEPair> RLEEncode(float[] array)
     {
-        Dictionary<int, int> frequencies = new Dictionary<int, int>();
+        List<RLEPair> rle = new List<RLEPair>();
+        int run = 0;
         
         for (int i = 0; i < array.Length; i++)
         {
             int value = Mathf.RoundToInt(array[i]);
-            if (frequencies.ContainsKey(value))
-                frequencies[value]++;
+            
+            if (value == 0)
+            {
+                run++;
+            }
             else
-                frequencies[value] = 1;
+            {
+                rle.Add(new RLEPair(run, value));
+                run = 0;
+            }
+        }
+        
+        if (rle.Count == 0 || run > 0)
+        {
+            rle.Add(new RLEPair(run, 0));
+        }
+        
+        return rle;
+    }
+
+    public void ShowRLEData(List<RLEPair> rle)
+    {
+        if (RLECells == null || RLECells[0] == null)
+            return;
+
+        for (int i = 0; i < 64 && i < RLECells.Length; i++)
+        {
+            if (RLECells[i] != null)
+            {
+                if (i < rle.Count)
+                {
+                    RLECells[i].text = $"({rle[i].run},{rle[i].value})";
+                }
+                else
+                {
+                    RLECells[i].text = "";
+                }
+            }
+        }
+    }
+
+    void BuildHuffmanTree(List<RLEPair> rle)
+    {
+        Dictionary<string, int> frequencies = new Dictionary<string, int>();
+        
+        for (int i = 0; i < rle.Count; i++)
+        {
+            string key = $"({rle[i].run},{rle[i].value})";
+            if (frequencies.ContainsKey(key))
+                frequencies[key]++;
+            else
+                frequencies[key] = 1;
         }
 
         List<HuffmanNode> nodes = new List<HuffmanNode>();
         foreach (var kvp in frequencies)
         {
-            nodes.Add(new HuffmanNode { value = kvp.Key, frequency = kvp.Value });
+            nodes.Add(new HuffmanNode { rleKey = kvp.Key, frequency = kvp.Value });
         }
 
         if (nodes.Count == 0) return;
@@ -777,7 +844,14 @@ public class JPEGCompressor : MonoBehaviour
         
         if (node.IsLeaf)
         {
-            huffmanCodes[node.value.Value] = code;
+            if (node.value.HasValue)
+            {
+                huffmanCodes[node.value.Value.ToString()] = code;
+            }
+            else if (!string.IsNullOrEmpty(node.rleKey))
+            {
+                huffmanCodes[node.rleKey] = code;
+            }
         }
         else
         {
@@ -786,7 +860,7 @@ public class JPEGCompressor : MonoBehaviour
         }
     }
 
-    public void ShowHuffmanData(float[] array)
+    public void ShowHuffmanData(List<RLEPair> rle)
     {
         if (HuffmanCells == null || HuffmanCells[0] == null)
             return;
@@ -795,11 +869,17 @@ public class JPEGCompressor : MonoBehaviour
         {
             if (HuffmanCells[i] != null)
             {
-                int value = Mathf.RoundToInt(array[i]);
-                
-                if (huffmanCodes.ContainsKey(value))
+                if (i < rle.Count)
                 {
-                    HuffmanCells[i].text = huffmanCodes[value];
+                    string key = $"({rle[i].run},{rle[i].value})";
+                    if (huffmanCodes.ContainsKey(key))
+                    {
+                        HuffmanCells[i].text = huffmanCodes[key];
+                    }
+                    else
+                    {
+                        HuffmanCells[i].text = "";
+                    }
                 }
                 else
                 {
@@ -858,7 +938,7 @@ public class JPEGCompressor : MonoBehaviour
 
         if (!node.IsLeaf)
         {
-            float verticalSpacing = isCompact ? 90f : 120f;
+            float verticalSpacing = isCompact ? 60f : 90f;
             float childContainerWidth = containerWidth * 0.5f;
             float yOffset = -verticalSpacing;
 
@@ -991,7 +1071,18 @@ public class JPEGCompressor : MonoBehaviour
         TMP_Text text = textObj.AddComponent<TextMeshProUGUI>();
         if (node.IsLeaf)
         {
-            text.text = node.value.Value.ToString() + "\n" + node.frequency;
+            if (node.value.HasValue)
+            {
+                text.text = node.value.Value.ToString() + "\n" + node.frequency;
+            }
+            else if (!string.IsNullOrEmpty(node.rleKey))
+            {
+                text.text = node.rleKey + "\n" + node.frequency;
+            }
+            else
+            {
+                text.text = node.frequency.ToString();
+            }
         }
         else
         {
