@@ -1,4 +1,6 @@
 using SFB;
+using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using TMPro;
 using UnityEngine;
@@ -19,6 +21,13 @@ public class JPEGCompressor : MonoBehaviour
     public Transform QDCTParent;
     public Transform QuantizedParent;
     public Image QuantizedImage;
+    public Image ZigZagMatrixPixelImage;
+    public Image ZigZagArrayPixelImage;
+    public Transform ZigZagMatrixNumberParent;
+    public Transform ZigZagArrayNumberParent;
+    public Transform RLEParent;
+    public Transform HuffmanParent;
+    public Transform HuffmanTreeParent;
 
     [Header("Other")]
     public Vector2Int SelectedBlock = new Vector2Int(0, 0);
@@ -29,6 +38,10 @@ public class JPEGCompressor : MonoBehaviour
     public TMP_Text[] QMatrixCells = new TMP_Text[64];
     public TMP_Text[] QDCTCells = new TMP_Text[64];
     public TMP_Text[] QuantizedCells = new TMP_Text[64];
+    public TMP_Text[] ZigZagMatrixNumberCells = new TMP_Text[64];
+    public TMP_Text[] ZigZagArrayNumberCells = new TMP_Text[64];
+    public TMP_Text[] RLECells = new TMP_Text[64];
+    public TMP_Text[] HuffmanCells = new TMP_Text[64];
 
     public readonly int[,] LumaQ =
     {
@@ -56,6 +69,8 @@ public class JPEGCompressor : MonoBehaviour
 
     Texture2D blockTex;
     Texture2D dctTex;
+    Texture2D zigZagMatrixTex;
+    Texture2D zigZagArrayTex;
     Texture2D sourceTexture;
     PixelYCbCr[,] ycbcr;
 
@@ -428,4 +443,675 @@ public class JPEGCompressor : MonoBehaviour
                 QuantizedCells[index].text = value.ToString();
             }
     }
+
+    public static Vector2Int[] GetZigZagOrder()
+    {
+        Vector2Int[] order = new Vector2Int[64];
+        int index = 0;
+        int x = 0, y = 0;
+        bool goingUp = true;
+
+        while (index < 64)
+        {
+            order[index] = new Vector2Int(x, y);
+            index++;
+
+            if (goingUp)
+            {
+                if (y == 0 || x == 7)
+                {
+                    goingUp = false;
+                    if (x == 7)
+                        y++;
+                    else
+                        x++;
+                }
+                else
+                {
+                    x++;
+                    y--;
+                }
+            }
+            else
+            {
+                if (x == 0 || y == 7)
+                {
+                    goingUp = true;
+                    if (y == 7)
+                        x++;
+                    else
+                        y++;
+                }
+                else
+                {
+                    x--;
+                    y++;
+                }
+            }
+        }
+
+        return order;
+    }
+
+    public float[] ZigZagRead(float[,] matrix)
+    {
+        Vector2Int[] order = GetZigZagOrder();
+        float[] result = new float[64];
+
+        for (int i = 0; i < 64; i++)
+        {
+            result[i] = matrix[order[i].x, order[i].y];
+        }
+
+        return result;
+    }
+
+    public float[] GetSelectedBlockZigZag()
+    {
+        float[,] quantized = GetSelectedBlockQuantized();
+        return ZigZagRead(quantized);
+    }
+
+    public Texture2D GetZigZagMatrixTexture(float[,] matrix, int step = -1, int scale = 32)
+    {
+        Texture2D tex = new Texture2D(8 * scale, 8 * scale, TextureFormat.RGB24, false);
+        
+        float min = float.MaxValue;
+        float max = float.MinValue;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+            {
+                if (matrix[x, y] < min) min = matrix[x, y];
+                if (matrix[x, y] > max) max = matrix[x, y];
+            }
+        
+        Vector2Int[] order = GetZigZagOrder();
+        
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+            {
+                int yy = 7 - y;
+                float v = (matrix[x, y] - min) / (max - min);
+                v = Mathf.Clamp01(v);
+                
+                Color c = new Color(v, v, v);
+                
+                if (step >= 0)
+                {
+                    bool isInPath = false;
+                    bool isCurrent = false;
+                    
+                    for (int j = 0; j <= step && j < 64; j++)
+                    {
+                        if (order[j].x == x && order[j].y == y)
+                        {
+                            isInPath = true;
+                            if (j == step)
+                                isCurrent = true;
+                            break;
+                        }
+                    }
+                    
+                    if (isCurrent)
+                        c = Color.yellow;
+                    else if (isInPath)
+                        c = Color.green;
+                }
+                
+                for (int sy = 0; sy < scale; sy++)
+                    for (int sx = 0; sx < scale; sx++)
+                        tex.SetPixel(x * scale + sx, yy * scale + sy, c);
+            }
+        
+        tex.filterMode = FilterMode.Point;
+        tex.Apply();
+        return tex;
+    }
+
+    public Texture2D GetZigZagArrayTexture(float[] array, int currentIndex = -1, int scale = 8)
+    {
+        int width = 64 * scale;
+        int height = scale;
+        Texture2D tex = new Texture2D(width, height, TextureFormat.RGB24, false);
+        
+        float min = float.MaxValue;
+        float max = float.MinValue;
+        for (int i = 0; i < 64; i++)
+        {
+            if (array[i] < min) min = array[i];
+            if (array[i] > max) max = array[i];
+        }
+        
+        for (int i = 0; i < 64; i++)
+        {
+            float v = (array[i] - min) / (max - min);
+            v = Mathf.Clamp01(v);
+            
+            Color c = new Color(v, v, v);
+            
+            if (currentIndex >= 0)
+            {
+                if (i == currentIndex)
+                    c = Color.yellow;
+                else if (i < currentIndex)
+                    c = Color.green;
+            }
+            
+            for (int sy = 0; sy < scale; sy++)
+                for (int sx = 0; sx < scale; sx++)
+                    tex.SetPixel(i * scale + sx, sy, c);
+        }
+        
+        tex.filterMode = FilterMode.Point;
+        tex.Apply();
+        return tex;
+    }
+
+    public void RefreshZigZagMatrixImage(int step = -1)
+    {
+        if (zigZagMatrixTex != null)
+            Destroy(zigZagMatrixTex);
+
+        float[,] quantized = GetSelectedBlockQuantized();
+        zigZagMatrixTex = GetZigZagMatrixTexture(quantized, step);
+
+        if (ZigZagMatrixPixelImage != null)
+        {
+            ZigZagMatrixPixelImage.sprite = Sprite.Create(
+                zigZagMatrixTex,
+                new Rect(0, 0, zigZagMatrixTex.width, zigZagMatrixTex.height),
+                new Vector2(0.5f, 0.5f)
+            );
+        }
+        
+        ShowZigZagMatrixNumbers(quantized);
+    }
+
+    public void RefreshZigZagArrayImage(int currentIndex = -1)
+    {
+        if (zigZagArrayTex != null)
+            Destroy(zigZagArrayTex);
+
+        float[] zigzagArray = GetSelectedBlockZigZag();
+        zigZagArrayTex = GetZigZagArrayTexture(zigzagArray, currentIndex);
+
+        if (ZigZagArrayPixelImage != null)
+        {
+            ZigZagArrayPixelImage.sprite = Sprite.Create(
+                zigZagArrayTex,
+                new Rect(0, 0, zigZagArrayTex.width, zigZagArrayTex.height),
+                new Vector2(0.5f, 0.5f)
+            );
+        }
+        
+        ShowZigZagArrayNumbers(zigzagArray);
+    }
+
+    public void ShowZigZagMatrixNumbers(float[,] matrix)
+    {
+        if (ZigZagMatrixNumberCells == null || ZigZagMatrixNumberCells[0] == null)
+            return;
+
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+            {
+                int index = y * 8 + x;
+                if (ZigZagMatrixNumberCells[index] != null)
+                {
+                    int value = Mathf.RoundToInt(matrix[x, y]);
+                    ZigZagMatrixNumberCells[index].text = value.ToString();
+                    ZigZagMatrixNumberCells[index].color = GetZigZagCellColor(index);
+                }
+            }
+    }
+
+    private Color GetZigZagCellColor(int index) {
+        Vector2Int[] order = GetZigZagOrder();
+        
+        for (int i = 0; i < 64; i++)
+        {
+            if (order[i].y * 8 + order[i].x == index)
+            {
+                float hue = i / 63f;
+                return Color.HSVToRGB(hue, 1f, 0.6f);
+            }
+        }
+        
+        return Color.white;
+    }
+
+    public void ShowZigZagArrayNumbers(float[] array)
+    {
+        if (ZigZagArrayNumberCells == null || ZigZagArrayNumberCells[0] == null)
+            return;
+
+        for (int i = 0; i < 64; i++)
+        {
+            if (ZigZagArrayNumberCells[i] != null)
+            {
+                int value = Mathf.RoundToInt(array[i]);
+                ZigZagArrayNumberCells[i].text = value.ToString();
+                float hue = i / 63f;
+                ZigZagArrayNumberCells[i].color = Color.HSVToRGB(hue, 1f, 0.6f);
+            }
+        }
+    }
+
+
+    public void UpdateZigZagPanel()
+    {
+        RefreshZigZagMatrixImage();
+        RefreshZigZagArrayImage();
+    }
+
+    class HuffmanNode
+    {
+        public int? value;
+        public string rleKey;
+        public int frequency;
+        public HuffmanNode left;
+        public HuffmanNode right;
+        public string code = "";
+
+        public bool IsLeaf => value.HasValue || !string.IsNullOrEmpty(rleKey);
+    }
+
+    public struct RLEPair
+    {
+        public int run;
+        public int value;
+        
+        public RLEPair(int r, int v)
+        {
+            run = r;
+            value = v;
+        }
+    }
+
+    List<RLEPair> rleData = new List<RLEPair>();
+    Dictionary<string, string> huffmanCodes = new Dictionary<string, string>();
+    HuffmanNode huffmanRoot;
+
+    public void UpdateHuffmanPanel()
+    {
+        float[] zigzagArray = GetSelectedBlockZigZag();
+        rleData = RLEEncode(zigzagArray);
+        ShowRLEData(rleData);
+        BuildHuffmanTree(rleData);
+        ShowHuffmanData(rleData);
+        VisualizeHuffmanTree();
+    }
+
+    List<RLEPair> RLEEncode(float[] array)
+    {
+        List<RLEPair> rle = new List<RLEPair>();
+        int run = 0;
+        
+        for (int i = 0; i < array.Length; i++)
+        {
+            int value = Mathf.RoundToInt(array[i]);
+            
+            if (value == 0)
+            {
+                run++;
+            }
+            else
+            {
+                rle.Add(new RLEPair(run, value));
+                run = 0;
+            }
+        }
+        
+        if (rle.Count == 0 || run > 0)
+        {
+            rle.Add(new RLEPair(run, 0));
+        }
+        
+        return rle;
+    }
+
+    public void ShowRLEData(List<RLEPair> rle)
+    {
+        if (RLECells == null || RLECells[0] == null)
+            return;
+
+        for (int i = 0; i < 64 && i < RLECells.Length; i++)
+        {
+            if (RLECells[i] != null)
+            {
+                if (i < rle.Count)
+                {
+                    RLECells[i].text = $"({rle[i].run},{rle[i].value})";
+                }
+                else
+                {
+                    RLECells[i].text = "";
+                }
+            }
+        }
+    }
+
+    void BuildHuffmanTree(List<RLEPair> rle)
+    {
+        Dictionary<string, int> frequencies = new Dictionary<string, int>();
+        
+        for (int i = 0; i < rle.Count; i++)
+        {
+            string key = $"({rle[i].run},{rle[i].value})";
+            if (frequencies.ContainsKey(key))
+                frequencies[key]++;
+            else
+                frequencies[key] = 1;
+        }
+
+        List<HuffmanNode> nodes = new List<HuffmanNode>();
+        foreach (var kvp in frequencies)
+        {
+            nodes.Add(new HuffmanNode { rleKey = kvp.Key, frequency = kvp.Value });
+        }
+
+        if (nodes.Count == 0) return;
+
+        while (nodes.Count > 1)
+        {
+            nodes = nodes.OrderBy(n => n.frequency).ToList();
+            
+            HuffmanNode left = nodes[0];
+            HuffmanNode right = nodes[1];
+            
+            HuffmanNode parent = new HuffmanNode
+            {
+                frequency = left.frequency + right.frequency,
+                left = left,
+                right = right
+            };
+            
+            nodes.RemoveAt(0);
+            nodes.RemoveAt(0);
+            nodes.Add(parent);
+        }
+
+        huffmanRoot = nodes[0];
+        huffmanCodes.Clear();
+        BuildCodes(huffmanRoot, "");
+    }
+
+    void BuildCodes(HuffmanNode node, string code)
+    {
+        if (node == null) return;
+        
+        node.code = code;
+        
+        if (node.IsLeaf)
+        {
+            if (node.value.HasValue)
+            {
+                huffmanCodes[node.value.Value.ToString()] = code;
+            }
+            else if (!string.IsNullOrEmpty(node.rleKey))
+            {
+                huffmanCodes[node.rleKey] = code;
+            }
+        }
+        else
+        {
+            BuildCodes(node.left, code + "0");
+            BuildCodes(node.right, code + "1");
+        }
+    }
+
+    public void ShowHuffmanData(List<RLEPair> rle)
+    {
+        if (HuffmanCells == null || HuffmanCells[0] == null)
+            return;
+
+        for (int i = 0; i < 64 && i < HuffmanCells.Length; i++)
+        {
+            if (HuffmanCells[i] != null)
+            {
+                if (i < rle.Count)
+                {
+                    string key = $"({rle[i].run},{rle[i].value})";
+                    if (huffmanCodes.ContainsKey(key))
+                    {
+                        HuffmanCells[i].text = huffmanCodes[key];
+                    }
+                    else
+                    {
+                        HuffmanCells[i].text = "";
+                    }
+                }
+                else
+                {
+                    HuffmanCells[i].text = "";
+                }
+            }
+        }
+    }
+
+    public void VisualizeHuffmanTree()
+    {
+        if (HuffmanTreeParent == null || huffmanRoot == null) return;
+
+        foreach (Transform child in HuffmanTreeParent)
+        {
+            Destroy(child.gameObject);
+        }
+
+        RectTransform containerRect = HuffmanTreeParent.GetComponent<RectTransform>();
+        if (containerRect == null) return;
+
+        float containerWidth = containerRect.rect.width;
+        if (containerWidth <= 0) containerWidth = 800f;
+
+        int maxDepth = GetTreeDepth(huffmanRoot);
+        bool isCompact = maxDepth > 5;
+
+        if (huffmanRoot.IsLeaf)
+        {
+            CreateTreeNode(huffmanRoot, HuffmanTreeParent, new Vector2(0, containerRect.rect.height * 0.5f - 100f), 0, isCompact);
+        }
+        else
+        {
+            float rootY = containerRect.rect.height * 0.5f - 100f;
+            DrawTree(huffmanRoot, HuffmanTreeParent, new Vector2(0, rootY), containerWidth, 0, isCompact);
+        }
+    }
+
+    int CountLeafNodes(HuffmanNode node)
+    {
+        if (node == null) return 0;
+        if (node.IsLeaf) return 1;
+        return CountLeafNodes(node.left) + CountLeafNodes(node.right);
+    }
+
+    int GetTreeDepth(HuffmanNode node)
+    {
+        if (node == null) return 0;
+        if (node.IsLeaf) return 1;
+        return 1 + Mathf.Max(GetTreeDepth(node.left), GetTreeDepth(node.right));
+    }
+
+    void DrawTree(HuffmanNode node, Transform parent, Vector2 position, float containerWidth, int depth, bool isCompact = false)
+    {
+        if (node == null) return;
+
+        if (!node.IsLeaf)
+        {
+            float verticalSpacing = isCompact ? 60f : 90f;
+            float childContainerWidth = containerWidth * 0.5f;
+            float yOffset = -verticalSpacing;
+
+            Vector2? leftPos = null;
+            Vector2? rightPos = null;
+
+            if (node.left != null)
+            {
+                leftPos = position + new Vector2(-containerWidth * 0.25f, yOffset);
+            }
+
+            if (node.right != null)
+            {
+                rightPos = position + new Vector2(containerWidth * 0.25f, yOffset);
+            }
+
+            if (leftPos.HasValue)
+            {
+                DrawLine(position, leftPos.Value, parent);
+                CreateEdgeLabel("0", position, leftPos.Value, parent, isCompact);
+            }
+
+            if (rightPos.HasValue)
+            {
+                DrawLine(position, rightPos.Value, parent);
+                CreateEdgeLabel("1", position, rightPos.Value, parent, isCompact);
+            }
+
+            CreateTreeNode(node, parent, position, depth, isCompact);
+
+            if (node.left != null && leftPos.HasValue)
+            {
+                DrawTree(node.left, parent, leftPos.Value, childContainerWidth, depth + 1, isCompact);
+            }
+
+            if (node.right != null && rightPos.HasValue)
+            {
+                DrawTree(node.right, parent, rightPos.Value, childContainerWidth, depth + 1, isCompact);
+            }
+        }
+        else
+        {
+            CreateTreeNode(node, parent, position, depth, isCompact);
+        }
+    }
+
+    void CreateEdgeLabel(string label, Vector2 start, Vector2 end, Transform parent, bool isCompact = false)
+    {
+        GameObject labelObj = new GameObject("EdgeLabel");
+        labelObj.transform.SetParent(parent, false);
+
+        float fontSize = isCompact ? 10f : 16f;
+        float labelSize = isCompact ? 18f : 25f;
+        float offset = isCompact ? -10f : -15f;
+
+        RectTransform rect = labelObj.AddComponent<RectTransform>();
+        Vector2 midPoint = (start + end) * 0.5f + new Vector2(0, offset);
+        rect.anchoredPosition = midPoint;
+        rect.sizeDelta = new Vector2(labelSize, labelSize);
+        rect.anchorMin = new Vector2(0.5f, 0.5f);
+        rect.anchorMax = new Vector2(0.5f, 0.5f);
+
+        TMP_Text text = labelObj.AddComponent<TextMeshProUGUI>();
+        text.text = label;
+        text.fontSize = fontSize;
+        text.alignment = TextAlignmentOptions.Center;
+        text.color = Color.red;
+        text.fontStyle = FontStyles.Bold;
+    }
+
+    Texture2D circleSprite;
+
+    Texture2D GetCircleSprite(int size)
+    {
+        if (circleSprite != null && circleSprite.width == size) return circleSprite;
+
+        if (circleSprite != null) Destroy(circleSprite);
+
+        circleSprite = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        float radius = size * 0.5f;
+        Vector2 center = new Vector2(radius, radius);
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                float distance = Vector2.Distance(new Vector2(x, y), center);
+                if (distance <= radius)
+                {
+                    circleSprite.SetPixel(x, y, Color.white);
+                }
+                else
+                {
+                    circleSprite.SetPixel(x, y, Color.clear);
+                }
+            }
+        }
+
+        circleSprite.Apply();
+        return circleSprite;
+    }
+
+    void CreateTreeNode(HuffmanNode node, Transform parent, Vector2 position, int depth, bool isCompact = false)
+    {
+        GameObject nodeObj = new GameObject("HuffmanNode");
+        nodeObj.transform.SetParent(parent, false);
+        
+        float nodeSize = isCompact ? 50f : 80f;
+        float fontSize = isCompact ? 12f : 18f;
+        
+        RectTransform rect = nodeObj.AddComponent<RectTransform>();
+        rect.anchoredPosition = position;
+        rect.sizeDelta = new Vector2(nodeSize, nodeSize);
+        rect.anchorMin = new Vector2(0.5f, 0.5f);
+        rect.anchorMax = new Vector2(0.5f, 0.5f);
+
+        Image bg = nodeObj.AddComponent<Image>();
+        bg.sprite = Sprite.Create(GetCircleSprite(Mathf.RoundToInt(nodeSize)), new Rect(0, 0, nodeSize, nodeSize), new Vector2(0.5f, 0.5f));
+        bg.color = node.IsLeaf ? new Color(0.2f, 0.6f, 0.9f) : new Color(0.8f, 0.8f, 0.8f);
+
+        GameObject textObj = new GameObject("Text");
+        textObj.transform.SetParent(nodeObj.transform, false);
+        
+        RectTransform textRect = textObj.AddComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.sizeDelta = Vector2.zero;
+        textRect.anchoredPosition = Vector2.zero;
+
+        TMP_Text text = textObj.AddComponent<TextMeshProUGUI>();
+        if (node.IsLeaf)
+        {
+            if (node.value.HasValue)
+            {
+                text.text = node.value.Value.ToString() + "\n" + node.frequency;
+            }
+            else if (!string.IsNullOrEmpty(node.rleKey))
+            {
+                text.text = node.rleKey + "\n" + node.frequency;
+            }
+            else
+            {
+                text.text = node.frequency.ToString();
+            }
+        }
+        else
+        {
+            text.text = node.frequency.ToString();
+        }
+        text.fontSize = fontSize;
+        text.alignment = TextAlignmentOptions.Center;
+        text.color = Color.white;
+        text.fontStyle = FontStyles.Bold;
+    }
+
+    void DrawLine(Vector2 start, Vector2 end, Transform parent)
+    {
+        GameObject lineObj = new GameObject("Line");
+        lineObj.transform.SetParent(parent, false);
+
+        RectTransform rect = lineObj.AddComponent<RectTransform>();
+        Vector2 direction = end - start;
+        float distance = direction.magnitude;
+        float angle = Mathf.Atan2(direction.y, direction.x) * Mathf.Rad2Deg;
+
+        rect.anchoredPosition = (start + end) * 0.5f;
+        rect.sizeDelta = new Vector2(distance, 2f);
+        rect.anchorMin = new Vector2(0.5f, 0.5f);
+        rect.anchorMax = new Vector2(0.5f, 0.5f);
+        rect.localEulerAngles = new Vector3(0, 0, angle);
+
+        Image line = lineObj.AddComponent<Image>();
+        line.color = Color.black;
+    }
 }
+
