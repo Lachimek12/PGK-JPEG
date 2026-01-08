@@ -306,11 +306,11 @@ public class JPEGCompressor : MonoBehaviour
                     {
                         float cosX = Mathf.Cos((2f * x + 1f) * u * Mathf.PI / (2f * BLOCK_SIZE));
                         float cosY = Mathf.Cos((2f * y + 1f) * v * Mathf.PI / (2f * BLOCK_SIZE));
-                        sum += block[x, y] * cosX * cosY;
+                        sum += (block[x, y] - 128.0f)  * cosX * cosY;
                     }
                 }
                 
-                dctBlock[u, v] = 0.25f * cu * cv * sum;
+                dctBlock[u, v] = 2 * cu * cv * sum / BLOCK_SIZE;
             }
         }
         
