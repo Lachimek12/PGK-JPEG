@@ -6,6 +6,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
+
 public class JPEGCompressor : MonoBehaviour
 {
     [Header("Images")]
@@ -17,12 +18,16 @@ public class JPEGCompressor : MonoBehaviour
     public Image SelectorImage;
     public Image DCTImage;
     public Image QDCTImage;
+    public Image DCTLegendImage;
+    public TMPro.TMP_Text DCTMinLabel;
+    public TMPro.TMP_Text DCTMaxLabel;
     public Transform QMatrixParent;
     public Transform QDCTParent;
     public Transform QuantizedParent;
     public Image QuantizedImage;
     public Image ZigZagMatrixPixelImage;
     public Image ZigZagArrayPixelImage;
+    public Image LensImage;
     public Transform ZigZagMatrixNumberParent;
     public Transform ZigZagArrayNumberParent;
     public Transform RLEParent;
@@ -42,6 +47,7 @@ public class JPEGCompressor : MonoBehaviour
     public TMP_Text[] ZigZagArrayNumberCells = new TMP_Text[64];
     public TMP_Text[] RLECells = new TMP_Text[64];
     public TMP_Text[] HuffmanCells = new TMP_Text[64];
+    public TMP_Text FinalCodeText;
 
     public readonly int[,] LumaQ =
     {
@@ -69,8 +75,10 @@ public class JPEGCompressor : MonoBehaviour
 
     Texture2D blockTex;
     Texture2D dctTex;
+    Texture2D dctLegendTex;
     Texture2D zigZagMatrixTex;
     Texture2D zigZagArrayTex;
+    Texture2D lensTex;
     Texture2D sourceTexture;
     PixelYCbCr[,] ycbcr;
 
@@ -280,29 +288,33 @@ public class JPEGCompressor : MonoBehaviour
 
     public float[,] DCT(float[,] block)
     {
-        float[,] F = new float[BLOCK_SIZE, BLOCK_SIZE];
-
+        float[,] dctBlock = new float[BLOCK_SIZE, BLOCK_SIZE];
+        float sqrt2 = Mathf.Sqrt(2f);
+        
         for (int u = 0; u < BLOCK_SIZE; u++)
+        {
             for (int v = 0; v < BLOCK_SIZE; v++)
             {
+                float cu = (u == 0) ? 1f / sqrt2 : 1f;
+                float cv = (v == 0) ? 1f / sqrt2 : 1f;
+                
                 float sum = 0f;
-
+                
                 for (int x = 0; x < BLOCK_SIZE; x++)
+                {
                     for (int y = 0; y < BLOCK_SIZE; y++)
                     {
-                        float pixel = block[x, y] - 128f;
-                        sum += pixel *
-                               Mathf.Cos(((2 * x + 1) * u * Mathf.PI) / (2 * BLOCK_SIZE)) *
-                               Mathf.Cos(((2 * y + 1) * v * Mathf.PI) / (2 * BLOCK_SIZE));
+                        float cosX = Mathf.Cos((2f * x + 1f) * u * Mathf.PI / (2f * BLOCK_SIZE));
+                        float cosY = Mathf.Cos((2f * y + 1f) * v * Mathf.PI / (2f * BLOCK_SIZE));
+                        sum += block[x, y] * cosX * cosY;
                     }
-
-                float cu = (u == 0) ? Mathf.Sqrt(1f / BLOCK_SIZE) : Mathf.Sqrt(2f / BLOCK_SIZE);
-                float cv = (v == 0) ? Mathf.Sqrt(1f / BLOCK_SIZE) : Mathf.Sqrt(2f / BLOCK_SIZE);
-
-                F[u, v] = cu * cv * sum;
+                }
+                
+                dctBlock[u, v] = 0.25f * cu * cv * sum;
             }
-
-        return F;
+        }
+        
+        return dctBlock;
     }
 
     public Texture2D GetSelectedBlockDCTTexture(int scale = 32)
@@ -325,25 +337,64 @@ public class JPEGCompressor : MonoBehaviour
         for (int y = 0; y < 8; y++)
             for (int x = 0; x < 8; x++)
             {
-                int yy = 7 - y;
+                int yy = y;
 
                 float v = (dct[x, y] - min) / (max - min);
                 v = Mathf.Clamp01(v);
-                Color c = new Color(v, v, v);
+                Color c = GetHeatmapColor(v);
 
                 for (int sy = 0; sy < scale; sy++)
                     for (int sx = 0; sx < scale; sx++)
-                        tex.SetPixel(x * scale + sx, yy * scale + sy, c);
+                        tex.SetPixel(x * scale + sx, (7 - yy) * scale + sy, c);
             }
 
         tex.Apply();
         return tex;
     }
 
+    Color GetHeatmapColor(float t)
+    {
+        t = Mathf.Clamp01(t);
+        
+        if (t < 0.25f)
+        {
+            float localT = t / 0.25f;
+            return Color.Lerp(new Color(0, 0, 1, 1), new Color(0, 1, 1, 1), localT);
+        }
+        else if (t < 0.5f)
+        {
+            float localT = (t - 0.25f) / 0.25f;
+            return Color.Lerp(new Color(0, 1, 1, 1), new Color(0, 1, 0, 1), localT);
+        }
+        else if (t < 0.75f)
+        {
+            float localT = (t - 0.5f) / 0.25f;
+            return Color.Lerp(new Color(0, 1, 0, 1), new Color(1, 1, 0, 1), localT);
+        }
+        else
+        {
+            float localT = (t - 0.75f) / 0.25f;
+            return Color.Lerp(new Color(1, 1, 0, 1), new Color(1, 0, 0, 1), localT);
+        }
+    }
+
     public void RefreshDCTImage()
     {
         if (dctTex != null)
             Destroy(dctTex);
+
+        float[,] block = GetSelectedBlock();
+        float[,] dct = DCT(block);
+
+        float min = float.MaxValue;
+        float max = float.MinValue;
+
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+            {
+                if (dct[x, y] < min) min = dct[x, y];
+                if (dct[x, y] > max) max = dct[x, y];
+            }
 
         dctTex = GetSelectedBlockDCTTexture();
 
@@ -352,6 +403,45 @@ public class JPEGCompressor : MonoBehaviour
             new Rect(0, 0, dctTex.width, dctTex.height),
             new Vector2(0.5f, 0.5f)
         );
+
+        if (DCTLegendImage != null)
+        {
+            if (dctLegendTex != null)
+                Destroy(dctLegendTex);
+
+            dctLegendTex = CreateHeatmapLegend(20, 200, min, max);
+            DCTLegendImage.sprite = Sprite.Create(
+                dctLegendTex,
+                new Rect(0, 0, dctLegendTex.width, dctLegendTex.height),
+                new Vector2(0.5f, 0.5f)
+            );
+        }
+
+        if (DCTMinLabel != null)
+            DCTMinLabel.text = min.ToString("F1");
+
+        if (DCTMaxLabel != null)
+            DCTMaxLabel.text = max.ToString("F1");
+    }
+
+    Texture2D CreateHeatmapLegend(int width, int height, float min, float max)
+    {
+        Texture2D tex = new Texture2D(width, height, TextureFormat.RGB24, false);
+
+        for (int y = 0; y < height; y++)
+        {
+            float t = (float)y / (height - 1);
+            t = 1f - t;
+            Color c = GetHeatmapColor(t);
+
+            for (int x = 0; x < width; x++)
+            {
+                tex.SetPixel(x, y, c);
+            }
+        }
+
+        tex.Apply();
+        return tex;
     }
 
     public float[,] GetSelectedBlockQuantized()
@@ -740,6 +830,7 @@ public class JPEGCompressor : MonoBehaviour
         BuildHuffmanTree(rleData);
         ShowHuffmanData(rleData);
         VisualizeHuffmanTree();
+        ShowFinalCode();
     }
 
     List<RLEPair> RLEEncode(float[] array)
@@ -887,6 +978,44 @@ public class JPEGCompressor : MonoBehaviour
                 }
             }
         }
+    }
+
+    public string GenerateFinalCode()
+    {
+        if (rleData == null || rleData.Count == 0)
+            return "";
+
+        System.Text.StringBuilder bitstream = new System.Text.StringBuilder();
+
+        for (int i = 0; i < rleData.Count; i++)
+        {
+            string key = $"({rleData[i].run},{rleData[i].value})";
+            if (huffmanCodes.ContainsKey(key))
+            {
+                bitstream.Append(huffmanCodes[key]);
+            }
+        }
+
+        string eobKey = "(0,0)";
+        if (huffmanCodes.ContainsKey(eobKey))
+        {
+            bitstream.Append(huffmanCodes[eobKey]);
+        }
+        else
+        {
+            bitstream.Append("EOB");
+        }
+
+        return bitstream.ToString();
+    }
+
+    public void ShowFinalCode()
+    {
+        if (FinalCodeText == null)
+            return;
+
+        string finalCode = GenerateFinalCode();
+        FinalCodeText.text = finalCode;
     }
 
     public void VisualizeHuffmanTree()
@@ -1112,6 +1241,124 @@ public class JPEGCompressor : MonoBehaviour
 
         Image line = lineObj.AddComponent<Image>();
         line.color = Color.black;
+    }
+
+    public void UpdateLensBlock(int blockX, int blockY, Vector2 screenPosition)
+    {
+        if (sourceTexture == null || LensImage == null || ycbcr == null)
+            return;
+
+        blockX = Mathf.Clamp(blockX, 0, Width / BLOCK_SIZE - 1);
+        blockY = Mathf.Clamp(blockY, 0, Height / BLOCK_SIZE - 1);
+
+        int sx = blockX * BLOCK_SIZE;
+        int sy = blockY * BLOCK_SIZE;
+
+        float[,] block = new float[8, 8];
+        for (int y = 0; y < BLOCK_SIZE; y++)
+            for (int x = 0; x < BLOCK_SIZE; x++)
+            {
+                var p = ycbcr[sx + x, sy + y];
+                float value = SelectedChannel switch
+                {
+                    JpegChannel.Y => p.Y,
+                    JpegChannel.Cb => p.Cb,
+                    JpegChannel.Cr => p.Cr,
+                    _ => 0
+                };
+                block[x, y] = value * 255f;
+            }
+
+        float min = float.MaxValue;
+        float max = float.MinValue;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+            {
+                if (block[x, y] < min) min = block[x, y];
+                if (block[x, y] > max) max = block[x, y];
+            }
+
+        int scale = 32;
+        int borderWidth = 2;
+
+        if (lensTex != null)
+            Destroy(lensTex);
+
+        lensTex = new Texture2D(8 * scale + borderWidth * 2, 8 * scale + borderWidth * 2, TextureFormat.RGB24, false);
+
+        for (int y = 0; y < 8; y++)
+        {
+            for (int x = 0; x < 8; x++)
+            {
+                float v = (block[x, y] - min) / (max - min);
+                Color c = new Color(v, v, v);
+
+                for (int scaleY = 0; scaleY < scale; scaleY++)
+                {
+                    for (int scaleX = 0; scaleX < scale; scaleX++)
+                    {
+                        int texX = borderWidth + x * scale + scaleX;
+                        int texY = borderWidth + (7 - y) * scale + scaleY;
+                        lensTex.SetPixel(texX, texY, c);
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < borderWidth; i++)
+        {
+            for (int j = 0; j < 8 * scale + borderWidth * 2; j++)
+            {
+                lensTex.SetPixel(j, i, Color.yellow);
+                lensTex.SetPixel(j, 8 * scale + borderWidth * 2 - 1 - i, Color.yellow);
+            }
+            for (int j = 0; j < 8 * scale + borderWidth * 2; j++)
+            {
+                lensTex.SetPixel(i, j, Color.yellow);
+                lensTex.SetPixel(8 * scale + borderWidth * 2 - 1 - i, j, Color.yellow);
+            }
+        }
+
+        lensTex.filterMode = FilterMode.Point;
+        lensTex.Apply();
+
+        LensImage.enabled = true;
+        LensImage.sprite = Sprite.Create(
+            lensTex,
+            new Rect(0, 0, lensTex.width, lensTex.height),
+            new Vector2(0.5f, 0.5f)
+        );
+
+        RectTransform lensRect = LensImage.rectTransform;
+        RectTransform canvasRect = lensRect.root as RectTransform;
+        
+        if (canvasRect != null)
+        {
+            Vector2 localPoint;
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                canvasRect,
+                screenPosition,
+                null,
+                out localPoint))
+            {
+                Vector2 offset = new Vector2(150f, 150f);
+                lensRect.anchoredPosition = localPoint + offset;
+            }
+        }
+    }
+
+    public void HideLens()
+    {
+        if (LensImage != null)
+        {
+            LensImage.enabled = false;
+            LensImage.sprite = null;
+        }
+        if (lensTex != null)
+        {
+            Destroy(lensTex);
+            lensTex = null;
+        }
     }
 }
 
